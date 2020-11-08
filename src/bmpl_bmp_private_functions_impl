@@ -1,0 +1,411 @@
+/*
+ * Task #4
+ *
+ * Azim Muradov, group #171
+ */
+
+#include "bmpl.h"
+
+#include <iso646.h>
+#include <stdlib.h>
+
+// "/* PUB */" - mean, that this function is part of the interface
+
+
+/*----------------------------------------------------- Constants ----------------------------------------------------*/
+
+static const size_t fieldSizes[] = {2, 4, 2, 2, 4, 4, 4, 4, 2, 2, 4, 4, 4, 4, 4, 4};
+
+static const size_t fieldOffsets[] = {0, 2, 6, 8, 10, 14, 18, 22, 26, 28, 30, 34, 38, 42, 46, 50};
+
+static const size_t fieldsCount = sizeof fieldSizes / sizeof *fieldSizes;
+
+
+/*------------------------------------------------ Read & Write utils ------------------------------------------------*/
+
+static BmplErrType BMPL_setFreadErr(FILE *file, const char *funcName) {
+    return BMPL_setErr(
+        feof(file) ? BMPL_E_G_FREAD_EOF : ferror(file) ? BMPL_E_G_FREAD_FERROR : BMPL_E_G_OTHER,
+        funcName
+    );
+}
+
+static BmplErrType BMPL_setFreadErrIfOrDrop(bool isErr, FILE *file, const char *funcName) {
+    return BMPL_setErrIfOrDrop(
+        isErr,
+        feof(file) ? BMPL_E_G_FREAD_EOF : ferror(file) ? BMPL_E_G_FREAD_FERROR : BMPL_E_G_OTHER,
+        funcName
+    );
+}
+
+
+static int BMPL_correctEnd(void *buf, size_t size) {
+    if (not(size == 1 or size == 2 or size == 4)) return -1;
+
+    if (size == 2) {
+        Word word = *(Word *) buf;
+        Byte bytes[] = {word, word >> 8u};
+        *(Byte *) buf = *bytes;
+    } else if (size == 4) {
+        DWord dWord = *(DWord *) buf;
+        Byte bytes[] = {dWord, dWord >> 8u, dWord >> 16u, dWord >> 24u};
+        *(Byte *) buf = *bytes;
+    }
+
+    return 0;
+}
+
+
+/*--------------------------------------------------- Validate BMP ---------------------------------------------------*/
+
+static BmplErrType BMPL_validateFh(Bmp *this, FILE *file) {
+    BMPL_dropLastErr();
+
+    BmpFileHeader fh = this->bmpV3.fh;
+
+    Word ft = fh.fileType;
+    DWord fs = fh.fileSize;
+    Word r1 = fh.reserved1;
+    Word r2 = fh.reserved2;
+    DWord bo = fh.bitmapOffset;
+
+    fseek(file, 0L, SEEK_END);
+    long trueFileSize = ftell(file);
+    fseek(file, BMPL_BMP_HEADER_V3_SIZE, SEEK_SET);
+
+
+    if (not(ft == 0x4D42)) return BMPL_setErr(BMPL_E_WF_FH_FT, __func__);
+    if (not(fs == trueFileSize)) return BMPL_setErr(BMPL_E_WF_FH_FS, __func__);
+    if (not(r1 == 0)) return BMPL_setErr(BMPL_E_WF_FH_R1, __func__);
+    if (not(r2 == 0)) return BMPL_setErr(BMPL_E_WF_FH_R2, __func__);
+    if (not(bo >= BMPL_BMP_HEADER_V3_SIZE)) return BMPL_setErr(BMPL_E_WF_FH_BO, __func__);
+
+    return BMPL_ET_OK;
+}
+
+static BmplErrType BMPL_validateIh(Bmp *this) {
+    BMPL_dropLastErr();
+
+    BmpFileHeader fh = this->bmpV3.fh;
+    BmpInfoHeader ih = this->bmpV3.ih;
+
+    DWord fs = fh.fileSize;
+    DWord bo = fh.bitmapOffset;
+
+    DWord s = ih.size;
+    Long w = ih.width;
+    Long h = ih.height;
+    Word p = ih.planes;
+    Word bpp = ih.bitsPerPixel;
+    DWord c = ih.compression;
+    DWord sob = ih.sizeOfBitmap;
+    DWord cu = ih.colorsUsed;
+    DWord ci = ih.colorsImportant;
+
+    Word bytesPerPx = bpp >> 3u;
+    Long trueSizeOfBitmap = (w * bytesPerPx + w * bytesPerPx % 4) * llabs(h);
+
+
+    if (s == 12 or s == 52 or s == 56 or s == 108 or s == 124) {
+        return BMPL_setErr(BMPL_E_NS_IH_S, __func__);
+    }
+    if (bpp == 1 or bpp == 2 or bpp == 4 or bpp == 16 or bpp == 32 or bpp == 64) {
+        return BMPL_setErr(BMPL_E_NS_IH_BPP, __func__);
+    }
+    if (1 <= c and c <= 6 or 11 <= c and c <= 13) {
+        return BMPL_setErr(BMPL_E_NS_IH_C, __func__);
+    }
+
+    if (not(s == BMPL_BMP_INFO_HEADER_V3_SIZE)) return BMPL_setErr(BMPL_E_WF_IH_S, __func__);
+    if (not(w >= 0)) return BMPL_setErr(BMPL_E_WF_IH_W, __func__);
+    if (not(p == 1)) return BMPL_setErr(BMPL_E_WF_IH_P, __func__);
+    if (not(bpp == 8 or bpp == 24)) return BMPL_setErr(BMPL_E_WF_IH_BPP, __func__);
+    if (not(c == 0)) return BMPL_setErr(BMPL_E_WF_IH_C, __func__);
+    if (not(sob == trueSizeOfBitmap)) return BMPL_setErr(BMPL_E_WF_IH_SOB_W_H_BPP, __func__);
+    if (not(bo + sob == fs)) return BMPL_setErr(BMPL_E_WF_IH_SOB_BO_FS, __func__);
+    if (not(bpp == 8 and cu <= 256 or bpp == 24 and cu == 0)) return BMPL_setErr(BMPL_E_WF_IH_CU, __func__);
+    if (not(ci <= cu)) return BMPL_setErr(BMPL_E_WF_IH_CI, __func__);
+
+    return BMPL_ET_OK;
+}
+
+static BmplErrType BMPL_validatePal(Bmp *this) {
+    BMPL_dropLastErr();
+
+    BmpInfoHeader ih = this->bmpV3.ih;
+    Byte *pal = this->bmpV3.pal;
+
+    Word bpp = ih.bitsPerPixel;
+    DWord cu = ih.colorsUsed;
+    DWord calculatedCU = bpp == 8 and cu == 0 ? 256 : cu;
+
+
+    bool isValid = true;
+    for (DWord i = 0; isValid and i < calculatedCU * 4; i += 4) {
+        isValid = pal[i + 3] == 0;
+    }
+
+    return BMPL_setErrIfOrDrop(not isValid, BMPL_E_WF_PAL_RES, __func__);
+}
+
+static BmplErrType BMPL_validateData(Bmp *this) {
+    BMPL_dropLastErr();
+
+    BmpInfoHeader ih = this->bmpV3.ih;
+
+    Word bpp = ih.bitsPerPixel;
+    DWord cu = ih.colorsUsed;
+    DWord calculatedCU = bpp == 8 and cu == 0 ? 256 : cu;
+
+    bool isValid = true;
+    if (bpp == 8) {
+        Byte *data = this->bmpV3.data;
+
+        Long w = ih.width, h = ih.height;
+        Long absH = llabs(h);
+        Long line = w + w % 4; // Number of bytes in one line
+
+        for (Long j = 0; isValid && j < absH; ++j) {
+            for (Long i = 0; isValid && i < w; ++i) {
+                isValid = data[j * line + i] < calculatedCU;
+            }
+        }
+    }
+
+    return BMPL_setErrIfOrDrop(not isValid, BMPL_E_WF_DATA_PAL_IND, __func__);
+}
+
+
+/*-------------------------------------------------- Read from file --------------------------------------------------*/
+
+static BmplErrType BMPL_readHeader(Bmp *this, FILE *file) {
+    BMPL_dropLastErr();
+
+    BmpFileHeader *fh = &this->bmpV3.fh;
+    BmpInfoHeader *ih = &this->bmpV3.ih;
+
+
+    Byte buf[BMPL_BMP_HEADER_V3_SIZE];
+
+    bool isOk = fread(buf, 1, BMPL_BMP_HEADER_V3_SIZE, file) == BMPL_BMP_HEADER_V3_SIZE;
+    if (not isOk) return BMPL_setFreadErr(file, __func__);
+
+    void *ptrs[] = {
+        &fh->fileType,
+        &fh->fileSize,
+        &fh->reserved1,
+        &fh->reserved2,
+        &fh->bitmapOffset,
+
+        &ih->size,
+        &ih->width,
+        &ih->height,
+        &ih->planes,
+        &ih->bitsPerPixel,
+        &ih->compression,
+        &ih->sizeOfBitmap,
+        &ih->horzResolution,
+        &ih->vertResolution,
+        &ih->colorsUsed,
+        &ih->colorsImportant,
+    };
+
+    for (size_t i = 0; i < fieldsCount; i++) {
+        BMPL_correctEnd(buf + fieldOffsets[i], fieldSizes[i]);
+
+        if (fieldSizes[i] == 2) *(Word *) ptrs[i] = *(Word *) (buf + fieldOffsets[i]);
+        else *(DWord *) ptrs[i] = *(DWord *) (buf + fieldOffsets[i]);
+    }
+
+    return BMPL_validateFh(this, file) or BMPL_validateIh(this);
+}
+
+static BmplErrType BMPL_readPal(Bmp *this, FILE *file) {
+    BMPL_dropLastErr();
+
+    BmpInfoHeader ih = this->bmpV3.ih;
+    Byte **pal = &this->bmpV3.pal;
+
+    Word bpp = ih.bitsPerPixel;
+    DWord cu = ih.colorsUsed;
+    DWord calculatedCU = bpp == 8 and cu == 0 ? 256 : cu;
+    DWord bytesNumber = calculatedCU * 4;
+
+
+    if (bpp == 8) {
+        *pal = malloc(bytesNumber);
+        if (*pal == NULL) return BMPL_setErr(BMPL_E_G_MEM_ALLOC, __func__);
+    } else {
+        *pal = NULL;
+    }
+
+    bool isOk = fread(*pal, 1, bytesNumber, file) == bytesNumber;
+
+    return BMPL_setFreadErrIfOrDrop(not isOk, file, __func__) or BMPL_validatePal(this);
+}
+
+static BmplErrType BMPL_readData(Bmp *this, FILE *file) {
+    BMPL_dropLastErr();
+
+    Byte **data = &this->bmpV3.data;
+
+    DWord sob = this->bmpV3.ih.sizeOfBitmap;
+
+
+    *data = malloc(sob);
+    if (*data == NULL) return BMPL_setErr(BMPL_E_G_MEM_ALLOC, __func__);
+
+    bool isOk = fread(*data, 1, sob, file) == sob;
+
+    return BMPL_setFreadErrIfOrDrop(not isOk, file, __func__) or BMPL_validateData(this);
+}
+
+
+/* PUB */ static BmplErrType BMPL_readFromFile(Bmp *this, const char *filename) {
+    BMPL_dropLastErr();
+
+    if (this == NULL) return BMPL_setErr(BMPL_E_G_NULL_BMP, __func__);
+    if (filename == NULL) return BMPL_setErr(BMPL_E_G_NULL_FILENAME, __func__);
+
+    FILE *file = fopen(filename, "rb");
+    if (file == NULL) return BMPL_setErr(BMPL_E_G_FOPEN, __func__);
+
+    BmplErrType errType = BMPL_readHeader(this, file);
+    if (not errType) errType = BMPL_readPal(this, file);
+    if (not errType) errType = BMPL_readData(this, file);
+
+    fclose(file);
+
+    return errType;
+}
+
+
+/*--------------------------------------------------- Write to file --------------------------------------------------*/
+
+static BmplErrType BMPL_writeHeader(Bmp *this, FILE *file) {
+    BMPL_dropLastErr();
+
+    BmpFileHeader *fh = &this->bmpV3.fh;
+    BmpInfoHeader *ih = &this->bmpV3.ih;
+
+
+    Byte buf[BMPL_BMP_HEADER_V3_SIZE];
+
+    void *ptrs[] = {
+        &fh->fileType,
+        &fh->fileSize,
+        &fh->reserved1,
+        &fh->reserved2,
+        &fh->bitmapOffset,
+
+        &ih->size,
+        &ih->width,
+        &ih->height,
+        &ih->planes,
+        &ih->bitsPerPixel,
+        &ih->compression,
+        &ih->sizeOfBitmap,
+        &ih->horzResolution,
+        &ih->vertResolution,
+        &ih->colorsUsed,
+        &ih->colorsImportant,
+    };
+
+    for (size_t i = 0; i < fieldsCount; i++) {
+        if (fieldSizes[i] == 2) *(Word *) (buf + fieldOffsets[i]) = *(Word *) ptrs[i];
+        else *(DWord *) (buf + fieldOffsets[i]) = *(DWord *) ptrs[i];
+
+        BMPL_correctEnd(buf + fieldOffsets[i], fieldSizes[i]);
+    }
+
+
+    bool isOk = fwrite(buf, 1, BMPL_BMP_HEADER_V3_SIZE, file) == BMPL_BMP_HEADER_V3_SIZE;
+
+    return BMPL_setErrIfOrDrop(not isOk, BMPL_E_G_FWRITE, __func__);
+}
+
+static BmplErrType BMPL_writePal(Bmp *this, FILE *file) {
+    BMPL_dropLastErr();
+
+    BmpInfoHeader ih = this->bmpV3.ih;
+    Byte *pal = this->bmpV3.pal;
+
+    Word bpp = ih.bitsPerPixel;
+    DWord cu = ih.colorsUsed;
+    DWord calculatedCU = bpp == 8 and cu == 0 ? 256 : cu;
+    DWord bytesNumber = calculatedCU * 4;
+
+
+    bool isOk = fwrite(pal, 1, bytesNumber, file) == bytesNumber;
+
+    return BMPL_setErrIfOrDrop(not isOk, BMPL_E_G_FWRITE, __func__);
+}
+
+static BmplErrType BMPL_writeData(Bmp *this, FILE *file) {
+    BMPL_dropLastErr();
+
+    Byte *data = this->bmpV3.data;
+
+    DWord sob = this->bmpV3.ih.sizeOfBitmap;
+
+
+    bool isOk = fwrite(data, 1, sob, file) == sob;
+
+    return BMPL_setErrIfOrDrop(not isOk, BMPL_E_G_FWRITE, __func__);
+}
+
+
+/* PUB */ static BmplErrType BMPL_writeToFile(Bmp *this, const char *filename) {
+    BMPL_dropLastErr();
+
+    if (this == NULL) return BMPL_setErr(BMPL_E_G_NULL_BMP, __func__);
+    if (filename == NULL) return BMPL_setErr(BMPL_E_G_NULL_FILENAME, __func__);
+
+    FILE *file = fopen(filename, "wb");
+    if (file == NULL) return BMPL_setErr(BMPL_E_G_FOPEN, __func__);
+
+    BmplErrType errType = BMPL_writeHeader(this, file);
+    if (not errType) errType = BMPL_writePal(this, file);
+    if (not errType) errType = BMPL_writeData(this, file);
+
+    fclose(file);
+
+    return errType;
+}
+
+
+/*--------------------------------------------------- Invert colors --------------------------------------------------*/
+
+/* PUB */ static BmplErrType BMPL_invertColors(Bmp *this) {
+    BMPL_dropLastErr();
+
+    if (this == NULL) return BMPL_setErr(BMPL_E_G_NULL_BMP, __func__);
+
+    BmpInfoHeader ih = this->bmpV3.ih;
+
+    Word bpp = ih.bitsPerPixel;
+
+
+    if (bpp == 8) {
+        Byte *pal = this->bmpV3.pal;
+
+        DWord cu = ih.colorsUsed;
+        DWord calculatedCU = cu == 0 ? 256 : cu;
+
+        for (size_t i = 0; i < calculatedCU; ++i) {
+            pal[i * 4 + 0] = compl pal[i * 4 + 0]; // b
+            pal[i * 4 + 1] = compl pal[i * 4 + 1]; // g
+            pal[i * 4 + 2] = compl pal[i * 4 + 2]; // r
+        }
+    } else if (bpp == 24) {
+        Byte *data = this->bmpV3.data;
+
+        DWord sob = this->bmpV3.ih.sizeOfBitmap;
+
+        for (Long i = 0; i < sob; ++i) {
+            data[i] = compl data[i];
+        }
+    }
+
+    return BMPL_ET_OK;
+}

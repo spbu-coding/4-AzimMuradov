@@ -18,7 +18,7 @@ static const DWord BMPL_BMP_FILE_HEADER_SIZE = 14;
 
 static const DWord BMPL_BMP_INFO_HEADER_V3_SIZE = 40;
 
-static const DWord BMPL_BMP_HEADER_V3_SIZE = BMPL_BMP_FILE_HEADER_SIZE + BMPL_BMP_INFO_HEADER_V3_SIZE;
+static const DWord BMPL_BMP_HEADER_V3_SIZE = 54;
 
 
 #if defined(BMPL_OPT_2_SPECIFIC_DIFF_MAX_SIZE_FOR_COMPARER) & !defined(BMPL_OPTARG_2_DIFF_MAX_SIZE)
@@ -69,3 +69,4 @@ BmplErrType BMPL_initBmp(Bmp *bmp);
 BmplErrType BMPL_eraseBmp(Bmp *bmp);
 
 #endif // TASK_4_BMPL_BMP_H
+

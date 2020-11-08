@@ -39,17 +39,32 @@ static BmplErrType BMPL_setFreadErrIfOrDrop(bool isErr, FILE *file, const char *
 }
 
 
+static inline bool BMPL_isHostLE(void) {
+    volatile uint32_t i = 0x01234567;
+    return *(uint8_t *) &i == 0x67;
+}
+
 static int BMPL_correctEnd(void *buf, size_t size) {
     if (not(size == 1 or size == 2 or size == 4)) return -1;
 
+    if (BMPL_isHostLE()) return 0;
+
     if (size == 2) {
-        Word word = *(Word *) buf;
-        Byte bytes[] = {word, word >> 8u};
-        *(Byte *) buf = *bytes;
+        Word *word = buf;
+
+        Word b0 = (*word & 0x00ffu) << 8u;
+        Word b1 = (*word & 0xff00u) >> 8u;
+
+        *word = b0 | b1;
     } else if (size == 4) {
-        DWord dWord = *(DWord *) buf;
-        Byte bytes[] = {dWord, dWord >> 8u, dWord >> 16u, dWord >> 24u};
-        *(Byte *) buf = *bytes;
+        DWord *dWord = buf;
+
+        DWord b0 = (*dWord & 0x000000ffu) << 24u;
+        DWord b1 = (*dWord & 0x0000ff00u) << 8u;
+        DWord b2 = (*dWord & 0x00ff0000u) >> 8u;
+        DWord b3 = (*dWord & 0xff000000u) >> 24u;
+
+        *dWord = b0 | b1 | b2 | b3;
     }
 
     return 0;
